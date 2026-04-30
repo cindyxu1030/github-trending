@@ -1,0 +1,17 @@
+# Local config
+.env
+.env.local
+
+# Generated output
+data/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
