@@ -55,6 +55,13 @@ Optional:
 | `INTERESTS` | `AI/ML, developer tools, frontend, automation` | Comma-separated topics that bias ranking |
 | `MODEL` | `claude-sonnet-4-6` | Any Claude Code-compatible model ID |
 | `DATA_DIR` / `REPORTS_DIR` / `SENT_REPOS_FILE` / `LOG_DIR` | inside repo | Override if you want output elsewhere |
+| `MAX_ATTEMPTS` | `4` | Retries before giving up (for unattended runs) |
+| `INITIAL_BACKOFF` | `60` | Seconds between retries; doubles each time |
+| `HARD_TIMEOUT` | `1800` | Seconds before a hung run is killed |
+
+## Reliability
+
+For unattended scheduled runs the script wraps the Claude call in a retry loop: up to `MAX_ATTEMPTS` tries with exponential backoff (`INITIAL_BACKOFF`, doubling each time), and each run is killed if it exceeds `HARD_TIMEOUT`. Every attempt and the final outcome are written to `logs/github-trending.log`.
 
 ## Scheduling
 

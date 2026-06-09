@@ -34,6 +34,11 @@ REPORTS_DIR="${REPORTS_DIR:-$DATA_DIR/reports}"
 SENT_REPOS_FILE="${SENT_REPOS_FILE:-$DATA_DIR/sent_repos.md}"
 LOG_DIR="${LOG_DIR:-$REPO_DIR/logs}"
 
+# Reliability config (overridable via .env)
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-4}"          # total tries before giving up
+INITIAL_BACKOFF="${INITIAL_BACKOFF:-60}"   # seconds between retries; doubles each time
+HARD_TIMEOUT="${HARD_TIMEOUT:-1800}"       # seconds; kill a single run if it hangs
+
 mkdir -p "$REPORTS_DIR" "$LOG_DIR"
 [ -f "$SENT_REPOS_FILE" ] || cat > "$SENT_REPOS_FILE" <<'EOF'
 # GitHub Trending — Previously Sent Repos
@@ -45,9 +50,7 @@ TODAY="$(date '+%Y-%m-%d')"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GitHub Trending scan starting..." >> "$LOG_FILE"
 
-claude \
-    --model "$MODEL" \
-    -p "You are the GitHub Trending Daily Scanner. Today is $TODAY.
+PROMPT="You are the GitHub Trending Daily Scanner. Today is $TODAY.
 
 ## Task
 Find the 3 hottest GitHub repositories right now and email the report to $RECIPIENT_EMAIL.
@@ -95,19 +98,59 @@ $SEND_EMAIL_SCRIPT --to '$RECIPIENT_EMAIL' --subject 'GitHub Trending — $TODAY
 
 The email body should be clean and readable plain text with the full report.
 
+If the email script exits non-zero, print the body in the conversation and report 'Email send failed — check $SEND_EMAIL_SCRIPT'. Do NOT silently report success.
+
 ## Rules
 - Never fabricate star counts or repo details — verify via the API
 - Include real, working GitHub URLs
 - Focus on what's genuinely trending NOW, not all-time popular repos everyone already knows
 - Keep summaries insightful — explain WHY it's trending, not just WHAT it does
-- Do NOT include repos already in the sent_repos file" \
-    >> "$LOG_FILE" 2>&1
+- Do NOT include repos already in the sent_repos file"
 
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 0 ]; then
+run_claude() {
+    # Run Claude in the background; kill it if it exceeds HARD_TIMEOUT.
+    claude --model "$MODEL" -p "$PROMPT" >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$HARD_TIMEOUT" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Timeout ${HARD_TIMEOUT}s — killing PID $pid" >> "$LOG_FILE"
+            kill -9 "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            return 124
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    wait "$pid"
+    return $?
+}
+
+ATTEMPT=1
+EXIT_CODE=1
+BACKOFF=$INITIAL_BACKOFF
+
+# Retry loop with exponential backoff. set +e so a failed attempt doesn't abort
+# the script before we can retry or log the failure.
+set +e
+while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Attempt $ATTEMPT/$MAX_ATTEMPTS" >> "$LOG_FILE"
+    run_claude
+    EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        break
+    fi
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Attempt $ATTEMPT failed (exit $EXIT_CODE). Sleeping ${BACKOFF}s." >> "$LOG_FILE"
+    sleep "$BACKOFF"
+    BACKOFF=$((BACKOFF * 2))
+    ATTEMPT=$((ATTEMPT + 1))
+done
+set -e
+
+if [ "$EXIT_CODE" -eq 0 ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] GitHub Trending scan completed successfully." >> "$LOG_FILE"
 else
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] GitHub Trending scan FAILED (exit $EXIT_CODE)." >> "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] GitHub Trending scan FAILED after $MAX_ATTEMPTS attempts (exit $EXIT_CODE)." >> "$LOG_FILE"
 fi
 
 exit $EXIT_CODE
